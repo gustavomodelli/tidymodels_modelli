@@ -1,0 +1,72 @@
+## --- Using Tidymodels ------------------- ##
+
+split <- initial_split(estonia, prop = 0.75, strata = 'Survived')
+estonia_train <- training(split)
+estonia_test <- testing(split)
+
+
+## -- Recipe ------------------------------ ##
+
+rec <- recipe(Survived ~ . , data = estonia_train) %>% 
+  step_rm(PassengerId, Firstname, Lastname) %>% 
+  step_other(Country, threshold = 0.05) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) 
+
+## -- Model ------------------------------- ##
+
+model_01 <- logistic_reg(mode = 'classification', penalty = tune(), mixture = tune()) %>% 
+  set_engine('glmnet')
+
+model_02 <- rand_forest(mode = 'classification', mtry = tune(), min_n = tune()) %>% 
+  set_engine('ranger') 
+
+# -- Workflow ---------------------------- ##
+
+work01 <- workflow() %>%
+  add_recipe(rec) %>% 
+  add_model(model_02) 
+
+# -- Folds ------------------------------- ##
+
+folds <- vfold_cv(estonia_train, v = 10, strata = 'Survived')
+
+## --- Grid ------------------------------ ##
+## -- grid regular make a padrom grid
+
+grid01 <- grid_regular(penalty(), mixture())
+
+
+## --- Using Tune ---------------------- ##
+
+tune01 <- work01 %>% 
+  tune_grid(
+    resamples = folds,
+    grid = 5
+  )
+
+
+## ----- Obtain results -------- ##
+
+tune01 %>% collect_metrics()
+
+melhor <- tune01 %>%  show_best('accuracy')
+
+## ------- Select best model ------- ##
+
+best <- tune01 %>% select_best(melhor)
+
+
+### Using Parameter of tune
+
+preparo <- prep(rec, estonia_train)
+estonia_train <- bake(preparo, estonia_train)
+estonia_test <- bake(preparo, estonia_test)
+
+model01 <- rand_forest(mode = 'classification', mtry = 3, min_n = 37) %>% 
+  set_engine('ranger') %>% 
+  fit(Survived ~ . , data = estonia_train)
+
+predito <- predict(model01, estonia_test)             
+confusionMatrix(predito$.pred_class, estonia_test$Survived)
+
+tidypredict::tidypredict_fit(model01)
