@@ -1,0 +1,159 @@
+library(tidyverse)
+library(broom)
+library(tidymodels)
+library(caret)
+library(vip)
+library(tidypredict)
+
+diabetes <- read_csv('diabetes_data_upload.csv')
+
+nomes <- str_c("'", names(diabetes),  "'", collapse = ' , ')
+names(diabetes) <- c('Age' , 'Gender' , 'Polyuria' , 'Polydipsia' , 'sudden_weight_loss' , 'weakness' , 'Polyphagia' , 'Genital_thrush' , 'visual_blurring' , 'Itching' , 'Irritability' , 'delayed_healing' , 'partial_paresis' , 'muscle_stiffness' , 'Alopecia' , 'Obesity' , 'class')
+diabetes$class <- as.factor(diabetes$class)
+str(diabetes)
+
+ggplot(diabetes, aes(class, fill = class))+
+  geom_bar()+
+  theme_bw()+
+  scale_fill_manual(values = c('blue','red'))
+
+diabetes$class <- ifelse(diabetes$class == 'Negative', 0, 1)
+model01 <- glm(class ~ . , data = diabetes, family = 'binomial')
+summary(model01)
+
+
+model01 <- step(model01)
+tidy(model01)
+
+
+##Separa o dado
+split <- initial_split(diabetes, prop = 0.80)
+diabetes.train <- training(split)
+diabetes.test <- testing(split)
+
+##Recipe
+rec <- recipe(class ~ . , data = diabetes.train) %>% 
+  step_nzv(all_predictors()) %>% 
+  step_dummy(all_nominal(), -all_outcomes())
+
+##Model
+model_ranger <- rand_forest(mode = 'classification', mtry = tune(), min_n = tune()) %>% 
+  set_engine('ranger', importance = 'impurity') 
+
+model_svm <- svm_rbf(mode = 'classification', cost = tune(), rbf_sigma = tune(), margin = tune()) %>% 
+  set_engine('kernlab') 
+
+model_xgb <- boost_tree(mode = 'classification', mtry = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), loss_reduction = tune()) %>% 
+  set_engine('xgboost')
+
+model_tree <- decision_tree(mode = 'classification', cost_complexity = tune(), tree_depth = tune(), min_n = tune()) %>% 
+  set_engine('rpart')
+
+##workflow
+work01 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_ranger)
+
+work02 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_svm)
+
+work03 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_xgb)
+
+
+work04 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_tree)
+
+##folds
+folds <- vfold_cv(diabetes.train, v = 10)
+
+##Tune
+tune01 <- tune_grid(
+  work01,
+    resamples = folds,
+    grid = 5
+)
+
+
+tune02 <- tune_grid(
+  work02,
+  resamples = folds,
+  grid = 5
+)
+
+
+tune_03 <- tune_grid(
+  work03,
+  resamples = folds,
+  grid = 5
+)
+
+tune04 <- tune_grid(
+  work04,
+  resamples = folds,
+  grid = 5,
+  metrics = metric_set(accuracy, roc_auc)
+)
+
+show_best(tune01)
+best <- select_best(tune01)
+
+show_best(tune02)
+best02 <- select_best(tune02)
+
+show_best(tune_03)
+best03 <- select_best(tune_03)
+
+show_best(tune04, metric = 'roc_auc')
+best04 <- select_best(tune04, metric = 'roc_auc')
+
+##fit model with best
+##Model
+model_ranger <- rand_forest(mode = 'classification', mtry = 5, min_n = 3) %>% 
+  set_engine('ranger', importance = 'impurity') %>% 
+  fit(class ~ . , data = diabetes.train)
+
+
+##apply rec in test set
+predito <- predict(model_final, diabetes.test)
+predito <- predict(model_final4, diabetes.test)
+confusionMatrix(predito$.pred_class, diabetes.test$class)
+
+
+##Alternativa
+model_final <- work01 %>% 
+  finalize_workflow(best) %>% 
+  fit(diabetes.train)
+
+model_final
+
+
+##Variable importance
+model_final %>% 
+  pull_workflow_fit() %>% 
+  vip()
+
+##Finalize
+model_final2 <- work02 %>% 
+  finalize_workflow(best02) %>% 
+  fit(diabetes.train)
+
+model_final2  
+
+
+model_final3 <- work03 %>% 
+  finalize_workflow(best03) %>% 
+  fit(diabetes.train)
+
+model_final3 %>% 
+  pull_workflow_fit() %>% 
+  vip()
+
+
+model_final4 <- work04 %>% 
+  finalize_workflow(best04) %>% 
+  fit(diabetes.train)
+
