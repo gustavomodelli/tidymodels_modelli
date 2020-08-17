@@ -1,0 +1,317 @@
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(recipes)
+library(h2o)
+library(themis)
+
+estonia <- read.csv('estonia.csv', stringsAsFactors = FALSE)
+str(estonia)
+
+##Convert varibles
+estonia <- estonia %>% 
+  mutate(
+    Country = as.factor(Country),
+    Sex = fct_recode(Sex,
+                     'male' = 'M',
+                     'female' = 'F'),
+    Category = fct_recode(Category,
+                          'crew' = 'C',
+                          'passenger' = 'P'),
+    Survived = factor(Survived, labels = c('no', 'yes'))
+  )
+
+##Family Travel
+estonia <- estonia %>% 
+  mutate(
+    family = duplicated(Lastname), 
+    family = ifelse(family == TRUE, 1, 0),
+    family = factor(family, labels = c('no','yes'))
+  )
+
+##Plots
+ggplot(estonia, aes(Survived, fill = Survived))+
+  geom_bar()+
+  theme_bw()
+
+##More man survived
+ggplot(estonia, aes(Survived, fill = Sex))+
+  geom_bar(position = 'fill')+
+  theme_bw()
+
+##By Category
+ggplot(estonia, aes(Survived, fill = Category))+
+  geom_bar(position = 'fill')+
+  theme_bw()
+
+#3By family
+##By Category
+ggplot(estonia, aes(Survived, fill = family))+
+  geom_bar(position = 'fill')+
+  theme_bw()
+
+##Age and Survied
+ggplot(estonia, aes(Survived, Age, fill = Survived))+
+  geom_boxplot()+
+  theme_bw()
+
+##By Country
+country <- estonia %>% 
+  group_by(Country, Survived) %>% 
+  count()
+
+ggplot(country, aes(reorder(Country, n), y = n , fill = Survived))+
+  geom_col()+
+  coord_flip()
+
+##model 01
+model01 <- glm(Survived ~ ns(Age, 2), data = estonia,
+               family = 'binomial')
+summary(model01)
+
+
+##Using Country
+rec <- recipe(Survived ~ . , data = estonia) %>% 
+  step_rm(PassengerId, Firstname, Lastname) %>% 
+  step_other(Country, threshold = 0.05) %>% 
+  step_dummy(all_nominal(), -all_outcomes())
+
+preparo <- prep(rec, estonia)
+estonia.new <- bake(preparo, estonia)
+
+##Using caret
+index <- createDataPartition(estonia$Survived, p = 0.75, list = FALSE)
+estonia.train <- estonia.new[index, ]
+estonia.test <- estonia.new[-index, ]
+
+set.seed(852)
+fit_control <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  allowParallel = TRUE)
+
+
+##Logistic
+estonia.glm <- train(Survived ~ .,
+                 data = estonia.train,
+                 method = "glmStepAIC",
+                 importance = TRUE,
+                 metric = 'Accuracy',
+                 trControl = fit_control)
+
+
+estonia.glm
+predito <- predict(estonia.glm, estonia.test)
+confusionMatrix(estonia.test$family, predito)
+
+
+
+##RF
+estonia.rf <- train(Survived ~ .,
+                     data = estonia.train,
+                     method = "ranger",
+                     importance = 'impurity',
+                     metric = 'Kappa',
+                     trControl = fit_control)
+
+
+estonia.rf
+varImp(estonia.rf)
+predito <- predict(estonia.rf, estonia.test)
+confusionMatrix(estonia.test$family, predito)
+
+##xgb
+estonia.xgb <- train(Survived ~ Age + Sex + Category + family,
+                    data = estonia.train,
+                    method = "xgbTree",
+                    metric = 'Kappa',
+                    trControl = fit_control)
+
+estonia.xgb
+predito <- predict(estonia.xgb, estonia.test)
+confusionMatrix(estonia.test$family, predito)
+
+##lasso
+estonia.lasso <- train(Survived ~ Age + Sex + Category + family,
+                     data = estonia.train,
+                     method = "glmnet",
+                     importance = TRUE,
+                     metric = 'Kappa',
+                     trControl = fit_control)
+
+estonia.lasso
+varImp(estonia.lasso)
+predito <- predict(estonia.lasso, estonia.test)
+confusionMatrix(estonia.test$family, predito)
+
+##svm
+estonia.svm <- train(Survived ~ Age + Sex + Category + family,
+                       data = estonia.train,
+                       method = "svmRadial",
+                       importance = TRUE,
+                       metric = 'Kappa',
+                       trControl = fit_control)
+
+estonia.svm
+predito <- predict(estonia.svm, estonia.test)
+confusionMatrix(estonia.test$family, predito)
+
+
+## Using H2o ##
+
+h2o.init()
+
+
+## Load data to H2o
+estonia.h2o <- as.h2o(estonia.new)
+
+##Slipt data 
+split <- h2o.splitFrame(estonia.h2o, ratios = 0.75)
+estonia_train <- split[[1]]
+estonia_test <- split[[2]]
+
+##Variables
+x <- setdiff(names(estonia.h2o), 'Survived')
+y <- 'Survived'
+
+
+##model
+
+estonia.glm.h2o <- h2o.glm(x = x, y = y, nfolds = 10, 
+                           lambda_search = TRUE, training_frame = estonia_train,
+                           family = 'binomial')
+
+estonia.glm.h2o
+h2o.varimp_plot(estonia.glm.h2o)
+h2o.performance(estonia.glm.h2o, newdata = estonia_test)
+
+
+##rf
+estonia.rf.h2o <- h2o.randomForest(x = x, y = y, nfolds = 10,
+                                   training_frame = estonia_train)
+
+h2o.varimp_plot(estonia.rf.h2o)
+h2o.performance(estonia.rf.h2o, newdata = estonia_test)
+
+##deep learning
+estonia.deep <- h2o.deeplearning(x = x, y = y, nfolds = 5,
+                                 training_frame = estonia_train)
+
+
+h2o.varimp_plot(estonia.deep)
+h2o.performance(estonia.deep, newdata = estonia_test)
+
+## --- Using Tidymodels ------------------- ##
+
+split <- initial_split(estonia, prop = 0.75, strata = 'Survived')
+estonia_train <- training(split)
+estonia_test <- testing(split)
+
+
+## -- Recipe ------------------------------ ##
+
+rec <- recipe(Survived ~ . , data = estonia_train) %>% 
+  step_rm(PassengerId, Firstname, Lastname) %>% 
+  step_other(Country, threshold = 0.05) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_normalize(Age) %>% 
+  step_adasyn(Survived)
+
+
+## -- Model ------------------------------- ##
+
+model_01 <- logistic_reg(mode = 'classification', penalty = tune(), mixture = tune()) %>% 
+  set_engine('glmnet')
+
+model_02 <- rand_forest(mode = 'classification', mtry = tune(), min_n = tune()) %>% 
+  set_engine('ranger') 
+
+model_03 <- boost_tree(mode = 'classification', mtry = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), loss_reduction = tune()) %>% 
+  set_engine('xgboost')
+
+# -- Workflow ---------------------------- ##
+
+work01 <- workflow() %>%
+  add_recipe(rec) %>% 
+  add_model(model_01) 
+
+work02 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_02)
+
+work03 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_03)
+
+
+# -- Folds ------------------------------- ##
+
+folds <- vfold_cv(estonia_train, v = 10, strata = 'Survived')
+
+## --- Grid ------------------------------ ##
+## -- grid regular make a padrom grid
+
+grid01 <- grid_regular(penalty(), mixture())
+
+
+## --- Using Tune ---------------------- ##
+
+tune01 <- work01 %>% 
+  tune_grid(
+    resamples = folds,
+    grid = 5,
+    metrics = metric_set(accuracy, roc_auc)
+  )
+
+tune02 <- work02 %>% 
+  tune_grid(
+    resamples = folds,
+    grid = 5,
+    metrics = metric_set(accuracy, roc_auc)
+  )
+
+
+tune03 <- work03 %>% 
+  tune_grid(
+    resamples = folds,
+    grid = 5,
+    metrics = metric_set(accuracy, roc_auc)
+  )
+
+
+## ----- Obtain results -------- ##
+
+tune01 %>% collect_metrics()
+tune02 %>% show_best('roc_auc')
+tune03 %>% show_best('roc_auc')
+melhor <- tune01 %>%  show_best('roc_auc')
+best01 <- select_best(tune01, metric = 'roc_auc')
+best02 <- select_best(tune02, metric = 'roc_auc')
+best03 <-  select_best(tune03, metric = 'roc_auc')
+
+## ------- Finalize Model ------- ##
+
+final01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  fit(estonia_train)
+
+final02 <- work02 %>% 
+  finalize_workflow(best02) %>% 
+  fit(estonia_train)
+
+final03 <- work03 %>% 
+  finalize_workflow(best03) %>% 
+  fit(estonia_train)
+
+
+predito <- predict(final01, estonia_test)
+confusionMatrix(predito$.pred_class, estonia_test$Survived)
+
+
+final01 %>% 
+  pull_workflow_fit() %>% 
+  vip()
+
+
+
