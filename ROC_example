@@ -1,0 +1,92 @@
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(vip)
+
+data("two_class_example")
+dados <- data("two_class_dat")
+
+## ---------------  split ---------------- ##
+
+split <- initial_split(two_class_dat, prop = 0.75)
+data_train <- training(split)
+data_test <- testing(split)
+
+
+## ------------- recipe ------------------ ##
+
+rec <- recipe(Class ~ . , data = data_train) %>% 
+  step_BoxCox(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+## ------------- Model ------------------ ##
+
+model_lasso <- logistic_reg(mode = 'classification', penalty = tune(), mixture = tune()) %>% 
+               set_engine('glmnet')
+
+
+## ----------- workflow ----------------- ##
+
+work01 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_lasso)
+
+## ---------- folds -------------------- ##
+
+folds <- vfold_cv(data_train, v = 10)
+
+## ----------- tune ------------------ ##
+
+tune01 <- tune_grid(
+  work01,
+  resamples = folds,
+  grid = 5,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+
+## -------- Select Best ------------- ##
+
+show_best(tune01)
+best01 <- select_best(tune01, metric = 'roc_auc')
+
+
+## -------- Fit model in test set ------ ##
+
+test01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  last_fit(split)
+
+test01 %>% 
+  collect_metrics()
+
+test01 %>% 
+  collect_predictions() %>% 
+  conf_mat(truth = Class, estimate = .pred_class) %>% 
+  autoplot( type = 'heatmap')
+
+test01 %>% 
+  collect_predictions() %>% 
+  roc_curve(truth = Class, estimate = .pred_Class1) %>% 
+  autoplot()
+
+
+## --- another way to Confusion Matrix
+
+final01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  fit(data_train)
+
+predito <- predict(final01, data_test)
+confusionMatrix(predito$.pred_class, data_test$Class)
+
+
+## --- visualize ----------- ##
+
+final01 %>% 
+  pull_workflow_fit() %>% 
+  tidy()
+
+final01 %>% 
+  pull_workflow_fit() %>% 
+  vip()
