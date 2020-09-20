@@ -1,0 +1,136 @@
+library(tidyverse)
+library(tidymodels)
+library(palmerpenguins)
+library(vip)
+
+str(penguins)
+
+
+## -- Model With Different Tune
+
+## -- Sample Split ----------------------------
+
+split <- initial_split(penguins, prop = 0.80)
+peng_train <- training(split)
+peng_test <- testing(split)
+
+
+## --- recipe --------------------------------
+
+rec <- recipe(species ~ . , data = peng_train) %>% 
+  step_rm(year) %>% 
+  step_medianimpute(all_numeric()) %>% 
+  step_unknown(sex) %>% 
+  step_dummy(all_nominal(),-all_outcomes()) %>% 
+  step_normalize(all_predictors()) 
+
+
+## --- Model ----------------------------------
+
+model_multimonial <- multinom_reg(mode = 'classification', penalty = tune(), mixture = tune()) %>% 
+                     set_engine('glmnet')
+
+
+model_xgb <- boost_tree(mode = 'classification', mtry = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), loss_reduction = tune()) %>% 
+             set_engine('xgboost')
+
+## --- Workflow --------------------------------
+
+work01 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_multimonial)
+
+work02 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_xgb)
+
+## --- Folds -----------------------------------
+
+folds <- vfold_cv(peng_train, v = 10)
+
+
+## --- Grid max entropy ----------------------
+
+multi_pars <- parameters(model_multimonial)
+
+grid_01 <- grid_max_entropy(multi_pars, size = 10)
+grid_02 <- grid_latin_hypercube(multi_pars, size = 10)
+
+
+#-- Tune xgboost
+
+boost_pars <- parameters(
+  finalize(mtry(), select(peng_train, -species) ), 
+  min_n(), 
+  tree_depth(), 
+  learn_rate(), 
+  loss_reduction()
+)
+
+grid_x1 <- grid_max_entropy(boost_pars, size = 10)
+grid_x2 <- grid_latin_hypercube(boost_pars, size =  10)
+
+## ---- Tune ---------------------------------
+
+tune01 <- tune_grid(
+  work01,
+  resamples = folds,
+  grid = grid_01
+)
+
+tune02 <- tune_grid(
+  work02,
+  resamples = folds,
+  grid = grid_x1
+)
+
+
+## --- Show best -----------------------------
+
+show_best(tune01)
+best01 <- select_best(tune01)
+
+
+show_best(tune02)
+best02 <- select_best(tune02)
+
+## ---- Test ----------------------------------
+
+test01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  last_fit(split)
+
+test01 %>% collect_metrics()
+
+test01 %>% collect_predictions() %>% 
+  conf_mat(truth = species, estimate = .pred_class)
+
+
+test02 <- work02 %>% 
+  finalize_workflow(best02) %>% 
+  last_fit(split)
+
+test02 %>% collect_metrics()
+
+
+test02 %>% collect_predictions() %>% 
+  conf_mat(truth = species, estimate = .pred_class)
+
+
+## --- Model Final ----------------------------
+
+final01 <- work01 %>% 
+  finalize_workflow(best01) %>%
+  fit(penguins)
+
+final01 %>% 
+  pull_workflow_fit() %>% 
+  vip()
+
+final02 <- work02 %>% 
+  finalize_workflow(best02) %>% 
+  fit(penguins)
+
+final02 %>% 
+  pull_workflow_fit() %>% 
+  vip()
