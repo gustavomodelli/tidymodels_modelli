@@ -1,0 +1,113 @@
+library(tidymodels)
+library(tidyverse)
+library(modeldata)
+library(recipeselectors)
+
+
+data("stackoverflow")
+str(stackoverflow)
+summary(stackoverflow)
+
+bin_vars <- c('Hobby','Data_scientist','Database_administrator','Desktop_applications_developer',
+              'Developer_with_stats_math_background','DevOps','Embedded_developer',
+              'Graphic_designer','Graphics_programming','Machine_learning_specialist',
+              'Mobile_developer','Quality_assurance_engineer','Systems_administrator',
+              'Web_developer')
+
+
+## -- EDA ---------------------
+
+ggplot(stackoverflow, aes(reorder(Country, Salary), Salary, fill = Country))+
+  geom_boxplot()+
+  coord_flip()
+
+ggplot(stackoverflow, aes(YearsCodedJob, Salary))+
+  geom_point()+
+  geom_smooth()
+
+##-- Train a model to predict salary
+
+split <- initial_split(stackoverflow, prop = 0.75)
+stack_train <- training(split)
+stack_test <- testing(split)
+
+
+## --- Recipe --------------------
+
+rec <- recipe(Salary ~ . , data = stack_train) %>% 
+  step_mutate_at(all_of(bin_vars), fn = ~ factor(. , labels = c('no','yes'))) %>% 
+  step_BoxCox(all_numeric(), -all_outcomes()) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_lincomb(all_predictors()) %>% 
+  step_corr(all_numeric(), threshold = 0.90) %>% 
+  step_normalize(all_predictors()) %>% 
+  step_ns(YearsCodedJob, deg_free = 3) %>% 
+  step_nzv(all_predictors()) %>% 
+  step_select_boruta(all_predictors(), outcome = 'Salary')
+
+## --- Model -------------------
+
+model_lasso <- linear_reg(mode = 'regression', penalty = tune(), mixture = tune()) %>% 
+              set_engine('glmnet')
+
+## --- workflow -----------------
+
+work01 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_lasso)
+
+## --- Resamples ---------------
+
+folds <- vfold_cv(stack_train, v = 10)
+
+
+## -- Tune ----------------------
+
+grid_lasso <- grid_latin_hypercube(parameters(model_lasso), size = 10)
+
+tun01 <- tune_grid(
+  work01,
+  resamples = folds,
+  grid = grid_lasso,
+  metrics = metric_set(rmse, mae)
+)
+
+## -- Bayes approach
+
+tune_bayes <- tune_bayes(
+  work01,
+  resamples = folds,
+  initial = 5,
+  iter = 50,
+  # How to measure performance?
+  metrics = metric_set(rmse),
+  control = control_bayes(no_improve = 30, verbose = TRUE)
+)
+
+## ---- Show Best ----------------
+
+show_best(tun01)
+best01 <- select_best(tun01)
+
+best02 <- select_best(tune_bayes)
+
+## ---- Test Model ---------------
+
+test01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  last_fit(split)
+
+test01 %>% collect_metrics()
+
+test01 %>%  collect_predictions() %>% 
+  ggplot(aes(.pred, Salary))+
+  geom_point()
+
+## --- model final ----------------
+
+model01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  fit(stackoverflow)
+
+model01 %>% pull_workflow_fit() %>% 
+  vip()
