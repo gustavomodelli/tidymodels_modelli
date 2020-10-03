@@ -1,0 +1,221 @@
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(janitor)
+library(themis)
+library(corrplot)
+library(rpart)
+
+##---- Load Data
+wine <- read_csv('winequality-red.csv')
+str(wine)
+
+wine <- clean_names(wine)
+
+##Binary Outcome
+
+wine <- wine %>% 
+  mutate(
+    quality = case_when(
+      quality >=7 ~ 'good',
+      quality < 7 ~ 'regular'
+    )
+  )
+
+## EDA -----------------------
+
+vars <- c(setdiff(names(wine), wine$quality))
+
+ggplot(wine, aes(quality, sulphates, fill = quality))+
+  geom_boxplot()
+
+ggplot(wine, aes(quality, total_sulfur_dioxide, fill = quality))+
+  geom_boxplot()
+
+ggplot(wine, aes(quality, alcohol, fill = quality))+
+  geom_boxplot()
+
+
+wine %>% 
+  select_if(is.numeric) %>% 
+  cor() %>% 
+  corrplot(method = 'number', type = 'upper')
+
+
+##Train a model ------------------------------
+
+split <- initial_split(wine, prop = 0.75, strata = 'quality')
+wine_train <- training(split)
+wine_test <- testing(split)
+
+
+#-- Recipe ------------------------------------
+
+rec <- recipe(quality ~ . , data = wine_train) %>% 
+  step_BoxCox(all_numeric()) %>% 
+  step_normalize(all_numeric()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_smote(quality)
+
+## -- Model lasso ------------------------------
+
+model_lasso <- logistic_reg(mode = 'classification', penalty = tune(), mixture = tune()) %>% 
+               set_engine('glmnet')
+
+model_xgb <- boost_tree(mode = 'classification', mtry = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune()) %>% 
+             set_engine('xgboost')
+
+model_part <- decision_tree(mode = 'classification', cost_complexity = tune(), tree_depth = tune(), min_n = tune()) %>% 
+              set_engine('rpart')
+
+## -- Workflow ---------------------------------
+
+work_lasso <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_lasso)
+
+work_xgb <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_xgb)
+
+work_part <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_part)
+
+## --- Folds ----------------------------------
+
+folds <- vfold_cv(wine_train, v = 10, strata = 'quality')
+
+
+## --- Tune -------------------------------------
+
+
+
+tune01 <- tune_grid(
+  work_lasso,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(roc_auc)
+)
+
+## Optional tune with bayes
+
+tune_lasso <- tune_bayes(
+  work_lasso,
+  resamples = folds,
+  initial = 5,
+  iter = 20,
+  metrics = metric_set(roc_auc),
+  control = control_bayes(no_improve = 15, verbose = TRUE)
+)
+
+tune02 <- tune_grid(
+  work_xgb,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(roc_auc)
+)
+
+tune03 <- tune_grid(
+  work_part,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(roc_auc)
+)
+
+##--- Show best ------------------------------------
+
+show_best(tune01)
+best01 <- select_best(tune01, metric = 'roc_auc')
+
+show_best(tune02)
+best02 <- select_best(tune02, metric = 'roc_auc')
+
+show_best(tune03)
+best03 <- select_best(tune03, metric = 'roc_auc')
+
+## --- Testing ------------------------------------
+
+test01 <- work_lasso %>% 
+  finalize_workflow(best01) %>% 
+  last_fit(split)
+
+test01 %>% collect_metrics()
+
+test01 %>% collect_predictions() %>% 
+  conf_mat(truth = quality, estimate = .pred_class)
+
+test02 <- work_xgb %>% 
+  finalize_workflow(best02) %>% 
+  last_fit(split)
+
+test02 %>% collect_metrics()
+
+test02 %>% collect_predictions() %>% 
+  conf_mat(truth = quality, estimate = .pred_class)
+
+## Final model -----------------------------------
+
+final01 <- work_lasso %>% 
+  finalize_workflow(best01) %>% 
+  fit(wine)
+
+final_lasso <- pull_workflow_fit(final01)
+
+plot01 <- final01 %>% pull_workflow_fit() %>% 
+  vi() 
+
+
+ggplot(plot01, aes(reorder(Variable, Importance), y = Importance))+
+  geom_col(aes(fill = ifelse(Sign == 'POS', 'red', 'blue')))+
+  coord_flip()+
+  theme_bw()+
+  theme(legend.position = 'none')
+
+fina02 <- work_xgb %>% 
+  finalize_workflow(best02) %>% 
+  fit(wine_train)
+
+final_xgb <- fina02 %>% pull_workflow_fit()
+
+final_xgb %>% 
+  vip()
+
+
+final03 <- work_part %>% 
+  finalize_workflow(best03) %>% 
+  fit(wine_train)
+
+model_final_part <- final03 %>% pull_workflow_fit()
+rpart.plot::rpart.plot(model_final_part$fit, type = 5)
+
+##Workflow just for visualization without tune
+
+model_rpart_vi <- decision_tree(mode = 'classification', tree_depth = 3, min_n = 50) %>% 
+                  set_engine('rpart')
+
+work_vis <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_rpart_vi) %>% 
+  last_fit(split)
+
+work_vis <- work_vis %>% pull_workflow_fit()
+rpart.plot::rpart.plot(work_vis$fit)
+## --- Using Shap
+
+##https://hfshr.netlify.app/posts/2020-06-07-variable-inportance-with-fastshap/
+
+library(fastshap)
+
+## -- obtein a prepared train data
+
+x <- prep(rec, wine_train) %>% 
+  juice() %>% 
+  select(-quality) %>% 
+  as.matrix()
+
+shap <- explain(final_xgb$fit, X = x, exact = TRUE)
+
+autoplot(shap)
+
+
