@@ -1,0 +1,201 @@
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(rpart)
+library(rpart.plot)
+library(themis)
+library(vip)
+library(DALEX)
+library(DALEXtra)
+
+##Load Data
+estonia <- read_csv('estonia-passenger-list.csv')
+str(estonia)
+
+skim(estonia)
+summary(estonia)
+
+estonia <- estonia %>% 
+  mutate(
+    Sex = fct_recode(Sex,
+                     male = 'M',
+                     female = 'F'),
+    Category = fct_recode(Category,
+                          passenger = 'P',
+                          crew = "C"),
+    Survived = factor(Survived, labels = c('no','yes')),
+    family = duplicated(Lastname),
+    family = ifelse(family == TRUE, 'yes', 'no' ),
+    age_cat = case_when(
+      
+      estonia$Age < 18 ~ 'menor_18',
+      Age >= 18 & Age < 40 ~ 'entre_18_40',
+      Age >=40 & Age < 60 ~ 'entre_40_60',
+      Age >=60 ~ 'Maior_60'
+    )
+  )
+
+
+##EDA
+
+ggplot(estonia, aes(Age, fill = Survived))+
+  geom_histogram()+
+  theme_bw()
+
+estonia %>% 
+  group_by(Country, Survived) %>% 
+  count() %>% 
+  ggplot(aes(reorder(Country, n), n, fill = Survived))+
+  geom_col()+
+  coord_flip()+
+  theme_bw()
+
+
+ggplot(estonia, aes(Survived, fill = Sex))+
+  geom_bar()+
+  theme_bw()
+
+
+estonia %>% 
+  group_by(age_cat, Survived) %>% 
+  count() %>% 
+  ggplot(aes(age_cat, n, fill = Survived))+
+  geom_col()+
+  coord_flip()
+
+
+##---- Model 01 ------------------------------------------------------
+
+set.seed(123)
+split <- initial_split(estonia, prop = 0.80, strata = 'Survived')
+estonia_train <- training(split)
+estonia_test <- testing(split)
+
+
+
+## --- Recipe ------------------------------------------------------
+
+rec <- recipe(Survived ~ . , data = estonia_train) %>% 
+  step_rm(PassengerId, Firstname, Lastname, Age) %>% 
+  step_other(Country, threshold = 0.05) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_smote(Survived) %>% 
+  step_zv(all_predictors())
+
+
+## ---- Model Lasso -----------------------------------------------
+
+model_lasso <- logistic_reg(mode = 'classification', mixture = tune(), penalty = tune()) %>%
+               set_engine('glmnet')
+
+model_xgb <- boost_tree(mode = 'classification', mtry = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), loss_reduction = tune(), sample_size = tune()) %>% 
+             set_engine('xgboost')
+
+## ---- Workflow ---------------------------------------------------
+
+work01 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_lasso)
+
+work02 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_xgb)
+
+#---- Folds --------------------------------------------------------
+
+folds <- vfold_cv(estonia_train, v = 10 , strata = 'Survived')
+
+
+#---- Tune ----------------------------------------------------------
+
+grid_lasso <- grid_latin_hypercube(parameters(model_lasso), size = 15)
+
+## -- Grid -------------------------------------------------------------
+
+tune01 <- tune_grid(
+  work01,
+  resamples = folds,
+  grid = grid_lasso,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+tune02 <- tune_grid(
+  work02,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+
+
+
+## -- Show best -----------------------------------------------------
+
+show_best(tune01, metirc = 'roc_auc')
+best01 <- select_best(tune01, metric = 'roc_auc')
+
+
+show_best(tune02)
+best02 <- select_best(tune02, metric = 'roc_auc')
+## --- test Set-----------------------------------------------------
+
+test01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  last_fit(split)
+
+test01 %>% collect_metrics()
+
+
+test02 <- work02 %>% 
+  finalize_workflow(best02) %>% 
+  last_fit(split)
+
+test02 %>% collect_metrics()
+
+test01 %>% collect_predictions() %>% 
+  conf_mat(truth = Survived, estimate = .pred_class) %>% 
+  autoplot(type = 'heatmap')
+
+
+## -- Final model ------------------------------------------------
+
+final01 <- work01 %>% 
+  finalize_workflow(best01) %>% 
+  fit(estonia_train)
+
+final01 %>% pull_workflow_fit() %>% 
+  vip()
+
+final02 <- work02 %>% 
+  finalize_workflow(best02) %>% 
+  fit(estonia)
+
+final02 %>% pull_workflow_fit() %>% 
+  vip()
+
+
+##-- Usinga Dalex01 ---------------------
+##-- Some  explain must convert y in numeric. 
+
+##With DALEX
+lasso_explain <-explain(final01 %>%  pull_workflow_fit(), data = estonia_train, y = ifelse(estonia_train$Survived == 'no',0,1 )) 
+
+##Performance
+plot(model_performance(lasso_explain))
+
+
+##With DALEXtra
+lasso_explain <-explain_tidymodels(final01, data = estonia_train, y = ifelse(estonia_train$Survived == 'no',0,1 )) 
+
+
+lasso_feature <- feature_importance(lasso_explain)
+plot(lasso_feature)
+
+##Shap
+lasso_shap <- predict_parts(lasso_explain, new_observation = estonia_train, type = 'shap')
+plot(lasso_shap)
+
+#Break_point
+lasso_break <- lasso_shap <- predict_parts(lasso_explain, new_observation = estonia_train, type = 'break_down')
+plot(lasso_break)
+
