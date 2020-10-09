@@ -1,0 +1,276 @@
+library(tidyverse)
+library(tidymodels)
+library(corrplot)
+library(vip) ## Variable Importance
+library(DALEXtra) ## Explain Models
+library(auditor) ##Residual plots between models
+
+coffee_ratings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-07-07/coffee_ratings.csv')
+
+
+##feets to meteers
+
+coffee_ratings <- coffee_ratings %>% 
+  mutate(
+    altitude_mean_meters = case_when(
+      unit_of_measurement == 'm' ~ altitude_mean_meters * 1,
+      unit_of_measurement == 'ft' ~ altitude_mean_meters * 0.3048
+    )
+  ) %>% 
+  mutate(
+    processing_method = case_when(
+      is.na(processing_method) ~ 'not_informed',
+      processing_method == 'Washed / Wet' ~ 'washed_wet',
+      processing_method == 'Natural / Dry' ~ 'natural_dry',
+      processing_method == 'Semi-washed / Semi-pulped' ~ 'semi_washed',
+      processing_method == 'Pulped natural / honey' ~ 'pulped_natural_honey',
+      processing_method == 'Other' ~ 'other'
+    )
+  )
+
+##Retirar outliers
+coffee_ratings <- coffee_ratings %>% 
+  filter(total_cup_points > 10) %>% 
+  filter(altitude_mean_meters < 10000)
+
+##EDA
+
+ggplot(coffee_ratings, aes(total_cup_points))+
+  geom_histogram()
+
+ggplot(coffee_ratings, aes(species, total_cup_points, fill = species))+
+  geom_boxplot()+
+  coord_flip()
+
+ggplot(coffee_ratings, aes(reorder(country_of_origin, total_cup_points), total_cup_points, fill = country_of_origin))+
+  geom_boxplot()+
+  theme(legend.position = 'none')+
+  coord_flip()
+
+
+ggplot(coffee_ratings, aes(reorder(variety, total_cup_points), total_cup_points, fill = variety))+
+  geom_boxplot()+
+  theme(legend.position = 'none')+
+  coord_flip()
+
+
+ggplot(coffee_ratings, aes(reorder(processing_method, total_cup_points), total_cup_points, fill = processing_method))+
+  geom_boxplot()+
+  theme(legend.position = 'none')+
+  coord_flip()
+
+ggplot(coffee_ratings, aes(altitude_mean_meters, total_cup_points))+
+  geom_point()
+
+ggplot(coffee_ratings, aes(sweetness, total_cup_points))+
+  geom_bin2d(bins = 10)+
+  scale_fill_gradient(low = 'tomato2', high = 'red')+
+  geom_smooth()
+
+ggplot(coffee_ratings, aes(flavor, total_cup_points))+
+  geom_bin2d(bins = 10)+
+  scale_fill_gradient(low = 'tomato2', high = 'red')
+
+
+ggplot(coffee_ratings, aes(uniformity, total_cup_points))+
+  geom_bin2d(bins = 5)+
+  scale_fill_gradient(low = 'tomato2', high = 'red')
+
+
+##Correlations numeric vars
+coffee_ratings %>% 
+  select_if(is.numeric) %>% 
+  cor(use = 'complete.obs') %>% 
+  corrplot::corrplot(method = 'number', type = 'upper')
+
+##Simple model 
+
+coffe <- coffee_ratings %>% 
+  select(total_cup_points, species, processing_method, aroma, flavor, aftertaste, acidity, body,
+         balance, uniformity, clean_cup, sweetness, moisture, category_one_defects, category_two_defects,
+         quakers, color, altitude_mean_meters)
+
+## Train a simple model ---------------------------------------------------
+
+set.seed(123)
+split <- initial_split(coffe, prop = 0.75, strata = 'total_cup_points')
+coffee_train <- training(split)
+coffee_test <- testing(split)
+
+
+## --- recipe --------------------------------------------------------------
+
+rec <- recipe(total_cup_points ~ . , data = coffee_train) %>%
+  step_medianimpute(all_numeric(), -all_outcomes()) %>% 
+  step_BoxCox(all_numeric(), -all_outcomes()) %>% 
+  step_normalize(all_numeric(), -all_outcomes()) %>% 
+  step_unknown(all_nominal()) %>% 
+  step_other(all_nominal(), threshold = 0.05) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_nzv(all_predictors())
+
+## ---- Model --------------------------------------------------------------
+
+model_lasso <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine('glmnet')
+
+model_ranger <- rand_forest(mode = 'regression', mtry = tune(), min_n = tune()) %>% 
+  set_engine('ranger')
+
+model_svm <- svm_rbf(mode = 'regression', cost = tune(), rbf_sigma = tune()) %>% 
+  set_engine('kernlab')
+
+model_knn <- nearest_neighbor(mode = 'regression', neighbors = tune(), weight_func = tune(), dist_power = tune()) %>% 
+  set_engine('kknn')
+
+## -- workflow-------------------------------------------------------------
+
+work_lasso <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_lasso)
+
+work_ranger <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_ranger)
+
+work_svm <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_svm)
+
+
+work_knn <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_knn)
+
+## -- Folds --------------------------------------------------------------
+
+folds <- vfold_cv(coffee_train, strata = 'total_cup_points')
+
+## -- Paralelal Process ---------------------------------------------------
+
+library(doParallel)
+
+doParallel::registerDoParallel()
+
+## -- Tune ---------------------------------------------------------------
+
+tune_lasso <- tune_grid(
+  work_lasso,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(rmse, rsq),
+  control = control_grid(verbose = TRUE)
+)
+
+
+tune_ranger <- tune_grid(
+  work_ranger,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(rmse, rsq),
+  control = control_grid(verbose = TRUE)
+)
+
+
+tune_svm <- tune_bayes(
+  work_svm,
+  resamples = folds,
+  initial = 5,
+  iter = 15,
+  metrics = metric_set(rmse),
+  control = control_bayes(verbose = TRUE)
+)
+
+tune_knn <- tune_grid(
+  work_knn,
+  resamples = folds,
+  grid = 15,
+  metrics = metric_set(rmse),
+  control = control_grid(verbose = TRUE)
+)
+
+## --- Best -----------------------------------------------------------
+
+show_best(tune_lasso)
+best01 <- select_best(tune_lasso, metric = 'rmse')
+
+best02 <- select_best(tune_ranger)
+
+show_best(tune_svm)
+best_svm <- select_best(tune_svm)
+
+## --- test model -----------------------------------------------------
+
+test01 <- work_lasso %>% 
+  finalize_workflow(best01) %>% 
+  last_fit(split)
+
+test01 %>% collect_metrics()
+
+test01 %>% collect_predictions() %>% 
+  filter(total_cup_points > 70) %>% 
+  ggplot(aes(.pred, total_cup_points))+
+  geom_point()+
+  geom_abline(color = 'red', size = 1.5)
+
+test02 <- work_ranger %>% 
+  finalize_workflow(best02) %>% 
+  last_fit(split)
+
+test02 %>% collect_metrics()
+
+test03 <- work_svm %>% 
+  finalize_workflow(best_svm) %>% 
+  last_fit(split)
+
+test03 %>% collect_metrics()
+
+test03 %>% collect_predictions() %>% 
+  filter(total_cup_points > 70) %>%
+  ggplot(aes(.pred, total_cup_points))+
+  geom_point()+
+  geom_abline(color = 'red', size = 1.5)
+
+## --- Model fit -----------------------------------------------------
+
+model_final_lasso <- work_lasso %>% 
+  finalize_workflow(best01) %>% 
+  fit(coffee_train)
+
+model_final_lasso %>% pull_workflow_fit() %>% 
+  vip()
+
+model_final_svm <- work_svm %>% 
+  finalize_workflow(best_svm) %>% 
+  fit(coffee_train)
+
+
+## Explain with DALEX ------------------------------------------
+
+explain_lasso <- explain_tidymodels(model_final_lasso, data = coffee_train %>% select(-total_cup_points),
+                                    y = coffee_train$total_cup_points, label = 'lasso')
+
+feature <- feature_importance(explain_lasso)
+plot(feature)
+
+##Shap
+shap_lasso <- predict_parts(explain_lasso, new_observation = coffee_train, type = 'shap')
+plot(shap_lasso)
+
+#Evaluation
+lasso_eval <- DALEX::model_performance(explain_lasso)
+
+##Explain SVM
+
+explain_svm <- explain_tidymodels(model_final_svm, data = coffee_train %>% select(-total_cup_points),
+                                    y = coffee_train$total_cup_points, label = 'svm')
+
+feature_svm <- feature_importance(explain_svm)
+plot(feature_svm)
+
+##Evaluatoion
+svm_eval <- DALEX::model_performance(explain_svm)
+
+plot(lasso_eval, svm_eval, geom = 'boxplot')
+
+plot(lasso_eval, svm_eval)
