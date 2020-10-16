@@ -1,0 +1,143 @@
+library(tidyverse)
+library(tidymodels)
+library(stacks)
+
+## Example of Stacks models
+
+data("tree_frogs")
+str(tree_frogs)
+
+
+# subset the data
+tree_frogs <- tree_frogs %>%
+  filter(!is.na(latency)) %>%
+  select(-c(clutch, hatched))
+
+##Predict latency
+
+ggplot(tree_frogs, aes(treatment, latency, fill = treatment))+
+  geom_boxplot()
+
+
+ggplot(tree_frogs) +
+  aes(x = age, y = latency, color = treatment) +
+  geom_point() +
+  labs(x = "Embryo Age (s)", y = "Time to Hatch (s)", col = "Treatment")+
+  geom_smooth()
+
+
+##First model lm
+
+split <- initial_split(tree_frogs, strata = 'latency', v = 5)
+frog_train <- training(split)
+frog_test <- testing(split)
+
+
+## recipe ---------------------------------------------
+
+rec_linear <- recipe(latency ~ . , data = frog_test) %>% 
+  step_BoxCox(all_numeric(), -latency) %>% 
+  step_normalize(all_numeric(), -latency) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_nzv(all_predictors())
+
+rec_tree <- recipe(latency ~ . , data = frog_test) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_nzv(all_predictors())
+
+
+## -- Models -----------------------------------------
+
+model_lm <- linear_reg() %>% 
+  set_engine('lm')
+
+model_ranger <- rand_forest(mode = 'regression', mtry = tune(), min_n = tune()) %>% 
+  set_engine('ranger')
+
+model_svm <- svm_rbf(mode = 'regression', cost = tune(), rbf_sigma = tune(), margin = tune()) %>% 
+  set_engine('kernlab')
+
+## -- workflow --------------------------------------
+
+work_lm <- workflow() %>% 
+  add_recipe(rec_linear) %>% 
+  add_model(model_lm)
+
+work_ranger <- workflow() %>% 
+  add_recipe(rec_tree) %>% 
+  add_model(model_ranger)
+
+work_svm <- workflow() %>% 
+  add_recipe(rec_linear) %>% 
+  add_model(model_svm)
+
+
+## -- folds --------------------------------------
+
+folds <- vfold_cv(frog_train, v = 5, strata = 'latency')
+
+## --- Grid -------------------------------------
+
+grid_linear <- fit_resamples(
+  work_lm,
+  resamples = folds,
+  metrics = metric_set(rmse),
+  control = control_stack_grid()
+)
+
+
+grid_ranger <- tune_grid(
+  work_ranger,
+  grid = 10,
+  resamples = folds,
+  metrics = metric_set(rmse),
+  control = control_stack_grid()
+)
+
+grid_svm <- tune_grid(
+  work_svm,
+  grid = 10,
+  resamples = folds,
+  metrics = metric_set(rmse),
+  control = control_stack_grid()
+)
+
+
+
+## perform test of individual models
+
+show_best(grid_linear)
+show_best(grid_ranger)
+
+##best model01
+test01 <- work_lm %>% 
+  last_fit(split)
+
+test01 %>% collect_metrics()
+
+
+test02 <- work_ranger %>% 
+  finalize_workflow(select_best(grid_ranger)) %>% 
+  last_fit(split)
+
+test02 %>% collect_metrics()
+
+
+## All models ins stack
+
+stack01 <- stacks() %>% 
+  add_candidates(grid_linear) %>% 
+  add_candidates(grid_ranger) %>% 
+  add_candidates(grid_svm) %>% 
+  blend_predictions()
+
+stack_final <- stack01 %>% fit_members()
+
+
+final_stack <- frog_test %>% 
+  select(latency) %>% 
+  mutate(predict(stack_final, frog_test))
+
+final_stack %>% 
+  rmse(truth = latency, estimate= .pred)
+
