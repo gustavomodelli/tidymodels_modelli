@@ -1,0 +1,355 @@
+library(tidyverse)
+library(tidymodels)
+library(splines)
+library(vip)
+library(themis)
+library(DALEXtra)
+
+##Load File
+dgf <- read.csv('DGF_multi_para_preditor.csv', sep = ',', 
+                stringsAsFactors = FALSE)
+str(dgf)
+##Variáveis categorias
+dgf$centroCOD <- factor(dgf$centroCOD, levels = c(0:17), labels = c('HIAE','HRIM','USP','UNICAMP','UNESP','FELICIO_ROCHO','HUSJ','JUIZ_FORA','SCMC','HSFARJ','ISCMPA','HCPA','JOINVILLE','RVBLU','CAJURU','HUWC','HGF','HPR'))
+dgf$sexo <- factor(dgf$sexo, labels = c('male','female'))
+dgf$raca <- factor(dgf$raca, levels = c(1,2,3,4,5,6), labels = c('white','pardo','negro','amarelo','indio','sem informação'))
+dgf$Negro <- factor(dgf$Negro, levels = c(0,1), labels = c('no','yes'))
+dgf$CausaDRC <- factor(dgf$CausaDRC, levels = c(1,2,3,4,5,6,7), labels = c('diabetes','GNC','HAS','indeterminada','policistico','urologico','outras'))
+dgf$Retx <- as.factor(dgf$Retx)
+dgf$DSA <- as.factor(dgf$DSA)
+dgf$DRCporDM <- factor(dgf$DRCporDM, labels = c('no','yes'))
+dgf$HIV <- as.factor(dgf$HIV)
+dgf$HepBoriginal <- factor(dgf$HepBoriginal, levels = c(1,2,3), labels = c('positivo','negativo','vacinado'))
+dgf$HepB <- as.factor(dgf$HepB)
+dgf$HepCoriginal <- factor(dgf$HepCoriginal, levels = c(1,2,3), labels = c('positivo','negativo','tratamento'))
+dgf$HepC <- as.factor(dgf$HepC)
+dgf$SexoDoador <- factor(dgf$SexoDoador, levels = c(1,2,3), labels = c('male','female','no_information'))
+dgf$RacaDoador <- factor(dgf$RacaDoador, levels = c(1,2,3,4,5,6), labels = c('branco','pardo','negro','amarelo','indio','nao informado'))
+dgf$HASDoador <- factor(dgf$HASDoador, levels = c(0,1), labels = c('no','yes'))
+dgf$DMDoador <- factor(dgf$DMDoador, levels = c(0,1), labels = c('no','yes'))
+dgf$CausaME <- factor(dgf$CausaME, levels = c(1,2,3,4,5), labels = c('trauma','cerebrovascular','anoxia','neoplasia','others'))
+dgf$DCE <- as.factor(dgf$DCE)
+dgf$PCR <- as.factor(dgf$PCR)
+dgf$DoadorMultiplo <- factor(dgf$DoadorMultiplo, levels = c(0,1), labels = c('no','yes'))
+dgf$DVA <- factor(dgf$DVA, levels = c(0,1,2), labels = c('no','yes','no_information'))
+dgf$DVANora <- as.factor(dgf$DVANora)
+dgf$DVADobuta <- as.factor(dgf$DVADobuta)
+dgf$DVAAssoc <- as.factor(dgf$DVAAssoc)
+dgf$DVADopa <- as.factor(dgf$DVADopa)
+dgf$DVAVaso <- as.factor(dgf$DVAVaso)
+dgf$DVAnaoespec <- as.factor(dgf$DVAnaoespec)
+dgf$DVAnao <- as.factor(dgf$DVAnao)
+dgf$HCVDoador <- as.factor(dgf$HCVDoador)
+dgf$SolucaoPerf <- factor(dgf$SolucaoPerf, levels = c(1,2,3,4,5,6), labels = c('Custodiol','IGL-1','Eurocollins','Belzer','Outro','Sem Informacao'))
+dgf$Eurocollins <- as.factor(dgf$Eurocollins)
+dgf$MaquinaPerf <- as.factor(dgf$MaquinaPerf)
+dgf$Inducao <- factor(dgf$Inducao, levels = c(1,2,3,4,5,6), labels = c('Timo','Basiliximab','Daclizumab','Outros','Corticoide','Nenhum'))
+dgf$Timo <- as.factor(dgf$Timo)
+dgf$CNItodasopcoes <- factor(dgf$CNItodasopcoes, levels = c(1,2,3,4,5), labels = c('CSA 48hs','Tacro 48hs','CSA tardio','Tacro tardio','Sem ICN'))
+dgf$CNItardioouSEM <- as.factor(dgf$CNItardioouSEM)
+dgf$Antiproliferativo <- factor(dgf$Antiproliferativo, levels = c(1,2,3), labels = c('Aza','MMF','Nenhum'))
+dgf$mTORiclassif <- factor(dgf$mTORiclassif, levels = c(1,2,3), labels = c('Everolimo','Sirolimo','Nenhum'))
+dgf$mTORi <- as.factor(dgf$mTORi)
+dgf$Esteroide <- as.factor(dgf$Esteroide)
+dgf$DGF <- factor(dgf$DGF, levels = c(0,1), labels = c('no','yes'))
+dgf$DGFsemHDpoi <- factor(dgf$DGFsemHDpoi, labels = c('no','yes'))
+dgf$RAclinica <- factor(dgf$RAclinica, levels = c(0,1), labels = c('no','yes'))
+dgf$BPARcomBL <- factor(dgf$BPARcomBL, levels = c(0,1), labels = c('no','yes'))
+dgf$Perda <- factor(dgf$Perda, levels = c(0,1), labels = c('no','yes'))
+dgf$PerdaSeg <- as.factor(dgf$PerdaSeg)
+
+##Teste Na
+dgf %>% 
+  map(~ sum(is.na(.)))
+
+##Cria a frequencia de DGF do centro
+table <- dgf %>% 
+  group_by(centroCOD) %>% 
+  count(DGFsemHDpoi) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  filter(DGFsemHDpoi == 'yes') %>% 
+  mutate(
+    dgf_frequency = case_when(
+      prop <= 0.35 ~ 'below_35%',
+      prop >0.35 & prop < 0.5 ~ 'between_35_50%',
+      prop >=0.5 & prop < 0.6 ~ 'between_50_60%',
+      prop >=0.6 & prop < 0.7 ~ 'between_60_70%',
+      prop >=0.7 ~ 'more_70%'
+    )
+  ) %>% 
+  select(centroCOD, dgf_frequency)
+
+
+##Join with dgf
+dgf <- dgf %>% 
+  inner_join(table)
+
+
+##Center effect is very important
+dgf %>% 
+  group_by(centroCOD) %>% 
+  count(DGFsemHDpoi) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  filter(DGFsemHDpoi == 'yes') %>% 
+  ggplot(aes(reorder(centroCOD, prop), prop))+
+  geom_col(aes(fill = ifelse(prop > median(prop), 'blue', 'red')))+
+  theme(legend.position = 'none')+ 
+  coord_flip()
+
+
+dgf %>% 
+  group_by(RegiaoCentro) %>% 
+  count(DGFsemHDpoi) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  filter(DGFsemHDpoi == 'yes') %>% 
+  ggplot(aes(reorder(RegiaoCentro, prop), prop))+
+  geom_col(aes(fill = ifelse(prop > median(prop), 'blue', 'red')))+
+  theme(legend.position = 'none')+ 
+  coord_flip()
+
+ggplot(dgf, aes(DGFsemHDpoi, DIHDoador, fill = DGFsemHDpoi))+
+  geom_boxplot()
+
+
+
+##Predictive model do DGF
+dgf_vars <- dgf %>% 
+  select(
+    idade, imc, DRCporDM, TempoDial, PRAI, PRAII, DSA, 
+    IdadeDoador, IMCDoador, HASDoador, CausaME, Crfinal, DCE,
+    DoadorMultiplo, TIF, TAV, HLAMM, SolucaoPerf, MaquinaPerf, DGFsemHDpoi,
+    dgf_frequency)
+
+dgf_vars <- dgf_vars %>% 
+  rename(DGF = 'DGFsemHDpoi')
+
+
+## -- Split the data --------------------------------------------
+
+set.seed(123)
+split <- initial_split(dgf_vars, prop=0.75, strata = 'DGF') 
+dgf_train <- training(split)
+dgf_test <- testing(split)
+
+##---PreProcess ---------------------------------------
+
+rec_lasso <- recipe(DGF~ . , data = dgf_train) %>% 
+  step_medianimpute(all_numeric(), -all_outcomes()) %>% 
+  step_unknown(DSA, HASDoador, CausaME, DoadorMultiplo, SolucaoPerf, new_level = 'no_information') %>% 
+  step_other(CausaME, SolucaoPerf, threshold = 0.01) %>% 
+  step_BoxCox(all_numeric()) %>%
+  step_normalize(all_numeric()) %>% 
+  step_ns(Crfinal, TempoDial, TIF, deg_free = 4) %>%
+  step_dummy(all_nominal(), -DGF) %>% 
+  step_zv(all_predictors()) 
+  
+
+rec_nnet <- rec_lasso <- recipe(DGF~ . , data = dgf_train) %>% 
+  step_medianimpute(all_numeric(), -all_outcomes()) %>% 
+  step_unknown(DSA, HASDoador, CausaME, DoadorMultiplo, SolucaoPerf, new_level = 'no_information') %>% 
+  step_other(CausaME, SolucaoPerf, threshold = 0.01) %>% 
+  step_BoxCox(all_numeric()) %>%
+  step_normalize(all_numeric()) %>% 
+  step_ns(Crfinal, TempoDial, TIF, deg_free = 4) %>%
+  step_dummy(all_nominal(), -DGF, one_hot = TRUE) %>% 
+  step_zv(all_predictors()) 
+
+
+rec_tree <- recipe(DGF~ . , data = dgf_train) %>% 
+    step_medianimpute(all_numeric(), -all_outcomes()) %>% 
+    step_unknown(DSA, HASDoador, CausaME, DoadorMultiplo, SolucaoPerf, new_level = 'no_information') %>% 
+    step_other(CausaME, SolucaoPerf, threshold = 0.01) %>% 
+    step_dummy(all_nominal(), -DGF, one_hot = TRUE) %>% 
+    step_zv(all_predictors()) 
+
+
+## -- Modeling ---------------------------------------
+
+model_lasso <- logistic_reg(penalty = tune(), mixture = tune()) %>% 
+    set_engine('glmnet')
+
+model_xgb <- boost_tree(mode = 'classification', mtry = tune(), min_n = tune(), tree_depth = tune(), loss_reduction = tune()) %>% 
+  set_engine('xgboost')
+
+model_net <- mlp(mode = 'classification', hidden_units = 1, penalty = tune(), dropout = tune(), epochs = tune()) %>% 
+  set_engine('nnet')
+
+  
+## --- Workflow -------------------------------------
+  
+work_lasso <- workflow() %>% 
+    add_recipe(rec_lasso) %>% 
+    add_model(model_lasso)
+
+work_xgb <- workflow() %>% 
+  add_recipe(rec_tree) %>% 
+  add_model(model_xgb)
+
+work_net <- workflow() %>% 
+  add_recipe(rec_nnet) %>% 
+  add_model(model_net)
+
+## -- folds ----------------------------------------
+
+set.seed(123)  
+folds <- vfold_cv(dgf_train, strata = 'DGF')
+
+## -- Tune ----------------------------------------
+
+doParallel::registerDoParallel()  
+
+set.seed(123)
+tune_lasso <- tune_grid(
+  work_lasso,
+  grid = 15,
+  resamples = folds,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+set.seed(123)
+tune_xgb <- tune_grid(
+  work_xgb,
+  grid = 25,
+  resamples = folds,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+
+set.seed(123)
+tune_net <- tune_grid(
+  work_net,
+  grid = 30,
+  resamples = folds,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+  
+## -- Select best ----------------------------------
+  
+show_best(tune_lasso)
+best_lasso <- select_best(tune_lasso)  
+
+show_best(tune_xgb)
+best_xgb <- select_best(tune_xgb)
+
+show_best(tune_net)
+best_net <- select_best(tune_net)
+
+## ---- Test ----------------------------------------
+
+test01 <- work_lasso %>% 
+  finalize_workflow(best_lasso) %>% 
+  last_fit(split)
+
+test01 %>% collect_predictions() %>% 
+  conf_mat(truth = DGF, estimate = .pred_class)
+
+test01 %>% collect_predictions() %>% 
+  roc_curve(truth = DGF, estimate = .pred_no) %>% 
+  autoplot()
+
+test02 <- work_xgb %>% 
+  finalize_workflow(best_xgb) %>% 
+  last_fit(split)
+
+matrix <- test02 %>% collect_predictions() %>% 
+  conf_mat(truth = DGF, estimate = .pred_class)
+
+test03 <- work_net %>% 
+  finalize_workflow(best_net) %>% 
+  last_fit(split)
+
+test03 %>% collect_predictions() %>% 
+  conf_mat(truth = DGF, estimate = .pred_class)
+
+##Model comparations
+between_models <- list(
+  model_lasso = collect_metrics(test01),
+  model_xgb = collect_metrics(test02),
+  model_nnet = collect_metrics(test03)
+)
+
+## --- final -----------------------------------------
+
+final_xgb <- work_xgb %>% 
+  finalize_workflow(best_xgb) %>% 
+  fit(dgf_train)
+
+final_xgb %>% pull_workflow_fit() %>% vip(num_features = 20)
+
+
+final_lasso <- work_lasso %>% 
+  finalize_workflow(best_lasso) %>% 
+  fit(dgf_train)
+
+final_lasso %>% pull_workflow_fit() %>% vip(num_features = 20)
+
+final_nnet <- work_net %>% 
+  finalize_workflow(best_net) %>% 
+  fit(dgf_train)
+
+final_nnet %>% pull_workflow_fit() %>% vip(num_features = 20)
+
+## ------------- Dalex ------------------------------------------------
+
+##NNet -- Creat the explain
+## https://modeloriented.github.io/DALEX/articles/vignette_titanic.html
+
+explain_nnet <- explain_tidymodels(final_nnet, data = dgf_test %>% select(-DGF),
+                              y = ifelse(dgf_test$DGF == 'no',0,1),
+                              label = 'Neuronal Net')
+
+
+## Variable importante (do not need explain in test set)
+feature_nnet <- feature_importance(explain_nnet)
+plot(feature_nnet)
+
+
+##Shap Plot
+shap_nnet <- predict_parts(explain_nnet, new_observation = dgf_train, type = 'shap')
+plot(shap_nnet)
+
+##Explain Perfofmance (need explain in test set)
+performance_nnet <- model_performance(explain_nnet)
+
+##Partial plot
+vr_tif <- model_profile(explain_nnet, variables = 'TIF')
+plot(vr_tif)
+
+vr_center <- model_profile(explain_nnet, variables = 'dgf_frequency')
+plot(vr_center)
+
+##Lasso
+explain_lasso <- explain_tidymodels(final_lasso, data = dgf_test %>% select(-DGF),
+                                   y = ifelse(dgf_test$DGF == 'no',0,1),
+                                   label = 'Elastic Net')
+
+perfomance_lasso <- model_performance(explain_lasso)
+
+feat_lasso <- feature_importance(explain_lasso)
+
+vr_lasso <- model_profile(explain_lasso, variables = 'TIF')
+
+
+##XgBoost
+explain_xgboost <- explain_tidymodels(final_xgb, data = dgf_test %>% select(-DGF),
+                                    y = ifelse(dgf_test$DGF == 'no',0,1),
+                                    label = 'XgBoost')
+
+perfomance_xgb <- model_performance(explain_xgboost)
+
+feat_xgb <- feature_importance(explain_xgboost)
+vr_xgb <- model_profile(explain_xgboost, variables = 'TIF')
+
+
+
+##Compare model
+plot(perfomance_lasso, perfomance_xgb, performance_nnet, geom = 'boxplot')
+plot(perfomance_lasso, perfomance_xgb, performance_nnet, geom = 'roc')
+
+
+##Combine plots - Patrial Plots
+plot(vr_tif, vr_lasso, vr_xgb)
+
+## combine plots importance
+plot(feature_nnet, feat_lasso, feat_xgb)
