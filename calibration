@@ -1,0 +1,54 @@
+##usign Caret
+dataPlotLasso <- data.frame(
+  obs = covid_test$death,
+  lassoReduced = predict(final_lasso_reduced, covid_test, type = 'prob')$.pred_no,
+  lassoFull = predict(final_lasso, covid_test, type = 'prob')$.pred_no,
+  xgBoostReduced = predict(final_xgb_reduced, covid_test, type = 'prob')$.pred_no,
+  xgBoostFull = predict(final_xgb, covid_test, type = 'prob')$.pred_no
+)
+
+cal_obj <- plot(calibration(obs ~ lassoFull + lassoReduced + xgBoostFull + xgBoostReduced, data = dataPlotLasso,
+                            cuts = 10))
+
+plot(cal_obj, type = "l", auto.key = list(columns = 3,
+                                          lines = TRUE,
+                                          points = FALSE))
+
+
+##Brier Score
+dataPlotLasso <- data.frame(
+  obs = ifelse(covid_test$death == 'no',0,1 ),
+  lassoReduced = predict(final_lasso_reduced, covid_test, type = 'prob')$.pred_no,
+  lassoFull = predict(final_lasso, covid_test, type = 'prob')$.pred_no,
+  xgBoostReduced = predict(final_xgb_reduced, covid_test, type = 'prob')$.pred_no,
+  xgBoostFull = predict(final_xgb, covid_test, type = 'prob')$.pred_no
+)
+
+
+mean((dataPlotLasso$obs - dataPlotLasso$lassoReduced )^2)
+mean((dataPlotLasso$obs - dataPlotLasso$lassoFull )^2)
+mean((dataPlotLasso$obs - dataPlotLasso$xgBoostFull )^2)
+mean((dataPlotLasso$obs - dataPlotLasso$xgBoostReduced )^2)
+
+## using RMS
+library(rms)
+
+##glm full
+predito <- predict(final_glm_full, covid_test, type = 'raw')
+phat <- 1/(1+exp(-predito))
+val.prob(phat, dataPlotLasso$obs, m=20, cex=.5)
+
+##glm reduced
+predito <- predict(final_glm, covid_test, type = 'raw')
+phat <- 1/(1+exp(-predito))
+val.prob(phat, dataPlotLasso$obs, m=20, cex=.5)
+
+##xgboost full
+predito <- predict(final_xgb, covid_test, type = 'raw')
+phat <- 1/(1+exp(-predito))
+val.prob(phat, dataPlotLasso$obs, m=20, cex=.5)
+
+##sgboost reduced
+predito <- predict(final_xgb_reduced, covid_test, type = 'raw')
+phat <- 1/(1+exp(-predito))
+val.prob(phat, dataPlotLasso$obs, m=20, cex=.5)
