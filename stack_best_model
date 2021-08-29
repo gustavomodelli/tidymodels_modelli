@@ -1,0 +1,175 @@
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(finalfit)
+library(broom)
+library(caret)
+library(pROC)
+library(vip)
+library(stacks)
+
+## Data
+covid <- read.csv('data_covid.csv', sep = ';', stringsAsFactors = FALSE)
+covid <- covid %>% clean_names()
+
+## Replace to NA
+covid <- covid %>% 
+  mutate_at(vars(contains('lab_')), ~ ifelse(. == 0, NA, .) ) %>% 
+  mutate(death = factor(death, labels = c('no','yes')))
+
+covid$lab_plts_yes <- NULL
+
+## % missing
+covid %>% 
+  missing_glimpse()
+
+## predictor with more than 30% missing
+## lab_il6, lab_procalcitonin
+
+## EDA
+theme_set(theme_bw())
+
+covid %>% 
+  ggplot(aes(map, fill = death))+
+  geom_density(alpha = .5)+
+  scale_fill_manual(values = c('blue','red'))
+
+## Correlations lab values
+covid %>% 
+  select(contains('lab_'), -lab_plts_yes) %>% 
+  cor(use = 'complete.obs') %>% 
+  corrplot::corrplot(type = 'upper', method = 'number')
+
+## split data
+covid_train <- covid %>% filter(derivation_cohort == 1)
+covid_test <- covid %>% filter(derivation_cohort == 0)
+
+
+## recipe
+rec <- recipe(death ~ . , data = covid_train) %>% 
+  step_rm(derivation_cohort, lab_il6, lab_procalcitonin, o2sats_yes,
+          severity, los) %>%  ## remove more than 30% missing
+  step_zv(all_predictors()) %>% 
+  step_knnimpute(all_predictors()) %>% ## using knn imputation
+  step_BoxCox(contains('lab_')) %>% 
+  step_ns(age, deg_free = tune()) %>% 
+  step_normalize(all_numeric(), -death) %>% 
+  step_nzv(all_predictors()) 
+
+rec_tree <- recipe(death ~ . , data = covid_train) %>% 
+  step_rm(derivation_cohort, lab_il6, lab_procalcitonin, o2sats_yes,
+          severity, los) %>%  ## remove more than 30% missing
+  step_zv(all_predictors()) %>% 
+  step_knnimpute(all_predictors()) %>% ## using knn imputation
+  step_nzv(all_predictors()) 
+
+## model
+
+model_lasso <- logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_engine('glmnet')
+
+
+model_xgb <- boost_tree(mode = 'classification', mtry = tune(), trees = tune(), learn_rate = 0.01) %>% 
+  set_engine('xgboost')
+
+## workflow
+work_lasso <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model_lasso)
+
+work_xgb <- workflow() %>% 
+  add_recipe(rec_tree) %>% 
+  add_model(model_xgb)
+
+## resamples
+set.seed(123)
+folds <- vfold_cv(covid_train, v = 5)
+
+
+## tune
+
+tune_lasso <- tune_grid(
+ work_lasso,
+ resamples = folds,
+ grid = crossing(penalty = 10^(seq(-6, -1, .15)), deg_free = c(4,6,8)),
+ control = control_grid(verbose = TRUE, save_pred = TRUE,
+                        save_workflow = TRUE),
+ metrics = metric_set(roc_auc, bal_accuracy)
+)
+
+tune_xgb <- tune_grid(
+  work_xgb,
+  resamples = folds,
+  grid = crossing(mtry = c(10,12,14), trees = c(500,800, 1000) ),
+  control = control_grid(verbose = TRUE, save_pred = TRUE,
+                         save_workflow = TRUE),
+  metrics = metric_set(roc_auc, bal_accuracy)
+)
+
+autoplot(tune_lasso)
+autoplot(tune_xgb)
+
+## final model using roc
+test_lasso <- work_lasso %>% 
+  finalize_workflow(select_best(tune_lasso)) %>% 
+  fit(covid_train)
+
+
+covid.test <- covid_test %>%
+  mutate(.pred_class = predict(test_lasso, covid_test)$.pred_class,
+         .pred_yes = predict(test_lasso, covid_test, type = 'prob')$.pred_yes,
+         .pred_no = predict(test_lasso, covid_test, type = 'prob')$.pred_no
+         )
+
+confusionMatrix(covid.test$death, covid.test$.pred_class)
+r <- roc(covid.test$death, covid.test$.pred_yes)
+plot(r)
+
+## vip
+test_lasso %>% pull_workflow_fit() %>% vip(num_features = 20)
+
+
+## final xgb 
+test_xgb <- work_xgb %>% 
+  finalize_workflow(select_best(tune_xgb)) %>% 
+  fit(covid_train)
+
+covid.test <- covid_test %>% 
+  mutate(.pred_class = predict(test_xgb, covid_test)$.pred_class,
+         .pred_yes = predict(test_xgb, covid_test, type = 'prob')$.pred_yes,
+         .pred_no = predict(test_xgb, covid_test, type = 'prob')$.pred_no
+  )
+
+confusionMatrix(covid.test$death, covid.test$.pred_class)
+r <- roc(covid.test$death, covid.test$.pred_yes)
+plot(r)
+
+## vip
+test_xgb %>% pull_workflow_fit() %>% vip(num_features = 20)
+
+## -------------------------------------------------------------------
+## Using Stacks
+
+lin_best <- tune_lasso %>% filter_parameters(parameters = select_best(tune_lasso))
+xgb_best <- tune_xgb %>% filter_parameters(parameters = select_best(tune_xgb))
+
+
+stack <- stacks() %>% 
+  add_candidates(lin_best) %>% 
+  add_candidates(xgb_best) %>% 
+  blend_predictions()
+
+stack <- stack %>% 
+  fit_members()
+
+## Results
+
+covid.test <- covid_test %>%
+  mutate(.pred_class = predict(stack, covid_test)$.pred_class,
+         .pred_yes = predict(stack, covid_test, type = 'prob')$.pred_yes,
+         .pred_no = predict(stack, covid_test, type = 'prob')$.pred_no
+  )
+
+confusionMatrix(covid.test$death, covid.test$.pred_class)
+r <- roc(covid.test$death, covid.test$.pred_yes)
+plot(r)
