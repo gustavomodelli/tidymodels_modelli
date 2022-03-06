@@ -1,0 +1,236 @@
+library(tidyverse)
+library(modeldata)
+library(GGally)
+library(splines)
+library(tidymodels)
+library(keras)
+library(broom)
+library(gtsummary)
+library(vip)
+
+
+##data
+data("concrete")
+concrete
+
+##paris
+ggpairs(concrete)
+
+##Cement
+concrete %>% 
+  ggplot(aes(compressive_strength, cement))+
+  geom_point()+
+  geom_smooth()
+
+concrete %>% 
+  ggplot(aes(compressive_strength, age))+
+  geom_point()+
+  geom_smooth()
+
+##model1
+model1 <- lm(compressive_strength ~ cement + age, data = concrete)
+summary(model1)
+
+
+con2 <- model1 %>% 
+  augment(concrete)
+
+con2 %>% 
+  mutate(extreme = case_when(
+    .resid > 10 ~ 'higher_resid',
+    .resid <=10 & .resid >= -10 ~ 'stand_resd',
+    .resid < -10 ~ 'lower_resid'
+  )) %>% 
+  tbl_summary(by = extreme)
+
+## model
+set.seed(123)
+split <- initial_split(concrete, prop = 0.80)
+concrete_train <- training(split)
+concrete_test <- testing(split)
+
+
+set.seed(123)
+folds <- vfold_cv(concrete_train, v = 5)
+
+## recipe
+rec_lasso <- recipe(compressive_strength ~ . , data = concrete_train) %>% 
+  step_YeoJohnson(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_corr(all_numeric_predictors(), threshold = .90)
+
+rec_tree <- recipe(compressive_strength ~ . , data = concrete_train) 
+
+## model
+model_lasso <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine('glmnet')
+
+model_rf <- rand_forest(mode = 'regression', mtry = tune(), trees = tune()) %>% 
+  set_engine('ranger')
+
+model_xgb <- boost_tree(mode = 'regression', mtry = tune(), trees = tune(), learn_rate = 0.1) %>% 
+  set_engine('xgboost')
+
+## workfllow
+work_lasso <- workflow(rec_lasso, model_lasso)
+work_rf <- workflow(rec_tree, model_rf)
+work_xgb <- workflow(rec_tree, model_xgb)
+
+## tune grid
+res_lasso <- tune_grid(
+  work_lasso,
+  resamples = folds,
+  metrics = metric_set(rmse, rsq),
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  grid = crossing(penalty = 10^seq(-6,-1, by = 0.25), mixture = c(0, 0.5, 1))
+)
+
+res_rf <- tune_grid(
+  work_rf,
+  resamples = folds,
+  metrics = metric_set(rmse, mae, rsq),
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  grid = crossing( mtry = c(3,4,5), trees = c(500,800,1000))
+)
+
+res_xgb <- tune_grid(
+  work_xgb,
+  resamples = folds,
+  metrics = metric_set(rmse, rsq),
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  grid = crossing( mtry = c(2,3,4), trees = c(500,800,1000))
+)
+
+## resultados
+autoplot(res_lasso)
+autoplot(res_rf)
+autoplot(res_xgb)
+
+
+res_xgb %>% collect_predictions() %>% 
+  ggplot(aes(.pred, compressive_strength, color = id))+
+  geom_point()
+
+## results
+res_xgb <- work_xgb %>% 
+  finalize_workflow(select_best(res_xgb)) %>% 
+  last_fit(split)
+
+res_xgb %>% collect_metrics()
+
+res_xgb %>% collect_predictions() %>% 
+  ggplot(aes(.pred, compressive_strength))+
+  geom_point()+
+  geom_abline(size = 1, linetype = 'dashed')
+
+## final model
+final_xgb <- work_xgb %>% 
+  finalize_workflow(parameters = list(mtry = 2, trees = 1000)) %>% 
+  fit(concrete)
+
+final_xgb %>% pull_workflow_fit() %>% vip()
+
+## working direct with xgboost
+library(xgboost)
+library(SHAPforxgboost)
+
+x_train <- rec_lasso %>% prep() %>% bake(new_data = concrete_train, all_predictors(), composition = 'matrix')
+y_train <- rec_lasso %>% prep() %>% bake(new_data = concrete_train, all_outcomes())
+y_train <- y_train$compressive_strength
+
+## test
+## test
+x_test <- rec_lasso %>% prep() %>% bake(new_data = concrete_test, all_predictors(), composition = 'matrix')
+y_test <- rec_lasso %>% prep() %>% bake(new_data = concrete_test, all_outcomes())
+y_test <- y_test$compressive_strength
+
+param_list <- list(objective = "reg:squarederror",  # For regression
+                   eta = 0.1,
+                   max_depth = 10,
+                   gamma = 0.01,
+                   subsample = 0.5,
+                   mtry = 2,
+                   trees = 1000
+)
+
+modelxgb <- xgboost(data = x_train, label = y_train, verbose = 1, 
+                    params = param_list, nrounds = 1000)
+
+
+x_test_predito <- predict(modelxgb, x_test)
+
+data.test <- data.frame(
+  truth = y_test,
+  estimate = x_test_predito
+)
+
+data.test %>% 
+  rmse(truth = truth, estimate = estimate)
+
+data.test %>% 
+  rsq(truth = truth, estimate = estimate)
+
+
+# To return the SHAP values and ranked features by mean|SHAP|
+shap_values <- shap.values(xgb_model = modelxgb, X_train = x_train)
+shap_values$mean_shap_score
+
+
+# using base R
+shap_long1 <- shap.prep(xgb_model =  modelxgb, X_train = x_train)
+##using tidymodels
+shap_long2 <- shap.prep(xgb_model =  model$fit, X_train = x_train)
+
+shap.plot.summary(shap_long1)
+shap.plot.summary(shap_long2)
+
+
+
+model <- final_xgb %>% pull_workflow_fit()
+## -------------------------------------------------------
+## using Keras -------------------------------------------
+
+x_train <- rec_lasso %>% prep() %>% bake(new_data = concrete_train, all_predictors(), composition = 'matrix')
+y_train <- rec_lasso %>% prep() %>% bake(new_data = concrete_train, all_outcomes())
+y_train <- y_train$compressive_strength
+
+
+## test
+x_test <- rec_lasso %>% prep() %>% bake(new_data = concrete_test, all_predictors(), composition = 'matrix')
+y_test <- rec_lasso %>% prep() %>% bake(new_data = concrete_test, all_outcomes())
+y_test <- y_test$compressive_strength
+
+
+## keras
+model <- keras_model_sequential() %>% 
+  layer_dense(units = 8, activation = 'relu', input_shape = c(8)) %>% 
+  layer_dense(units = 8, activation = 'relu', input_shape = c(8)) %>% 
+  layer_dense(units = 8, activation = 'relu', input_shape = c(8)) %>% 
+  layer_dense(units = 8, activation = 'relu', input_shape = c(8)) %>% 
+  layer_dense(units = 1)
+
+#Compilte
+model %>% 
+  compile(
+    loss = "mse",
+    optimizer = optimizer_rmsprop(),
+    metrics = list("mean_absolute_error")
+  )
+
+##it
+history <- model %>% fit(
+  x = x_train,
+  y = y_train,
+  epochs = 100,
+  validation_split = 0.2,
+  verbose = 1
+)
+
+
+history
+
+
+##validation
+model %>% 
+  evaluate(x_test, y_test)
+
