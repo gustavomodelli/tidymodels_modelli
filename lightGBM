@@ -1,0 +1,63 @@
+library(tidyverse)
+library(tidymodels)
+library(bonsai) # LigthGbm
+library(modeldata)
+library(embed)
+
+## load data
+data("Sacramento")
+
+# LogPrice
+Sacramento <- Sacramento %>% 
+  mutate(price = log(price))
+
+## fit a xgboost and ligthgbm model
+set.seed(123)
+split <- initial_split(Sacramento, strata = 'price')
+sac_train <- training(split)
+sac_test <- testing(split)
+
+## folds
+set.seed(123)
+folds <- vfold_cv(sac_train, strata = 'price', v = 5)
+
+## recipe
+rec <- recipe(price ~ . , data = sac_train) %>% 
+  step_other(city, threshold = 0.05) %>% 
+  step_lencode_glm(zip, outcome = vars(price)) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors())
+
+## model
+model_xgb <- boost_tree(mode = 'regression', mtry = tune(), trees = tune()) %>% 
+  set_engine('xgboost')
+
+model_lgb <- boost_tree(mode = 'regression', mtry = tune(), trees = tune(), tree_depth = tune(), min_n =  tune()) %>% 
+  set_engine('lightgbm')
+
+
+## worflow
+work_xgb <- workflow(rec, model_xgb)
+work_lgb <- workflow(rec, model_lgb)
+
+## tune
+tune_xgb <- tune_grid(
+  work_xgb,
+  resamples = folds,
+  grid = crossing(mtry = c(2,3,4), trees = c(250,500,800)),
+  metrics = metric_set(rmse, rsq),
+  control = control_grid(verbose = TRUE)
+)
+
+autoplot(tune_xgb)
+
+## LGB
+tune_lgb <- tune_grid(
+  work_lgb,
+  resamples = folds,
+  grid = 20,
+  metrics = metric_set(rmse, rsq),
+  control = control_grid(verbose = TRUE)
+)
+
+autoplot(tune_lgb)
