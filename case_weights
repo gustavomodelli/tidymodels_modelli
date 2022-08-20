@@ -1,0 +1,148 @@
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(janitor)
+
+## data
+rent <- read_csv('house_rent_dataset.csv') %>% clean_names()
+
+rent <- rent %>% 
+  mutate(rent = ifelse(rent > 50000, 'high','low'))
+
+rent <- rent %>% 
+  mutate(weight = ifelse(rent == 'high', 6,1),
+         weight = importance_weights(weight)
+         )
+
+## model using 
+set.seed(123)
+split <- initial_split(rent, strata = 'rent')
+rent_training <- training(split)
+rent_testing <- testing(split)
+
+
+set.seed(234)
+folds <- vfold_cv(rent_training, v = 5, strata = 'rent')
+
+
+## model
+rec_lasso <- recipe(rent ~ . , data = rent_training) %>% 
+  step_date(posted_on, features = c('month'), keep_original_cols = FALSE) %>% 
+  step_other(all_nominal_predictors(), threshold = 0.05) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_ns(size, deg_free = 3) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_zv(all_predictors())
+
+rec_tree <- recipe(rent ~ . , data = rent_training) %>% 
+  step_date(posted_on, features = c('month'), keep_original_cols = FALSE) %>% 
+  step_other(all_nominal_predictors(), threshold = 0.05) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors())
+
+
+## model
+model_lasso <- logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_engine('glmnet')
+
+model_xgb <- boost_tree(mode = 'classification', mtry = tune(), trees = tune(), tree_depth = tune()) %>% 
+  set_engine('xgboost')
+
+
+## workflow
+work_lasso <- workflow(rec_lasso, model_lasso)
+
+work_lasso_weight <- workflow() %>% 
+  add_recipe(rec_lasso) %>% 
+  add_model(model_lasso) %>% 
+  add_case_weights(weight)
+
+work_xgb <- workflow() %>% 
+  add_recipe(rec_tree) %>% 
+  add_model(model_xgb) 
+
+
+work_xgb_w <- workflow() %>% 
+  add_recipe(rec_tree) %>% 
+  add_model(model_xgb) %>% 
+  add_case_weights(weight)
+
+## tune
+tune_lasso <- tune_grid(
+  work_lasso,
+  resamples = folds,
+  grid = crossing(penalty = 10^seq(-6,-1, by = 0.15)),
+  metrics = metric_set(precision, roc_auc, accuracy),
+  control = control_grid(verbose = TRUE)
+)
+
+tune_lasso_w <- tune_grid(
+  work_lasso_weight,
+  resamples = folds,
+  grid = crossing(penalty = 10^seq(-6,-1, by = 0.15)),
+  metrics = metric_set(precision, roc_auc, accuracy),
+  control = control_grid(verbose = TRUE)
+)
+
+tune_xgb <- tune_grid(
+  work_xgb,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(precision, roc_auc, accuracy),
+  control = control_grid(verbose = TRUE)
+)
+
+tune_xgb_w <- tune_grid(
+  work_xgb_w,
+  resamples = folds,
+  grid = 10,
+  metrics = metric_set(precision, roc_auc, accuracy),
+  control = control_grid(verbose = TRUE)
+)
+
+autoplot(tune_lasso)
+autoplot(tune_lasso_w)
+autoplot(tune_xgb)
+
+## test lasso
+test_lasso <- work_lasso %>% 
+  finalize_workflow(select_best(tune_lasso, metric = 'roc_auc')) %>% 
+  last_fit(split)
+
+test_lasso %>% collect_metrics()
+
+test_lasso %>% collect_predictions() %>% 
+  conf_mat(truth = rent, estimate = .pred_class)
+
+
+## test lasso weight
+test_lasso_w <- work_lasso_weight %>% 
+  finalize_workflow(select_best(tune_lasso_w)) %>% 
+  last_fit(split)
+
+test_lasso_w %>% collect_metrics()
+
+test_lasso_w %>% collect_predictions() %>% 
+  conf_mat(truth = rent, estimate = .pred_class)
+
+## test xgb
+test_xgb <- work_xgb %>% 
+  finalize_workflow(select_best(tune_xgb, metric = 'precision')) %>% 
+  last_fit(split)
+
+test_xgb %>% collect_metrics()
+
+test_xgb %>% collect_predictions() %>% 
+  conf_mat(truth = rent, estimate = .pred_class)
+
+
+
+## test xgb case weight
+test_xgb_w <- work_xgb_w %>% 
+  finalize_workflow(select_best(tune_xgb_w, metric = 'precision')) %>% 
+  last_fit(split)
+
+test_xgb_w %>% collect_metrics()
+
+test_xgb_w %>% collect_predictions() %>% 
+  conf_mat(truth = rent, estimate = .pred_class)
