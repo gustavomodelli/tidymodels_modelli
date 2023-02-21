@@ -1,0 +1,22 @@
+library(SHAPforxgboost)
+
+# extract xgBoost from tidymodels
+model_xgb <- final_xgb %>% extract_fit_engine()
+
+# prepare x matrix form recipes
+train_x <- rec_tree %>% prep() %>% bake(new_data = egfr_train, all_predictors(),
+                                        composition = 'matrix')
+
+## prep function of SHAPforxgboost
+prep_xgb <- shap.prep(xgb_model = model_xgb, X_train = train_x)
+
+## define new labels
+new_labels <- list(age = 'Age (years)', cretmg = 'Creatinine (mg/dl)', sexe_male = 'Male Sex')
+
+# summary plot
+p1 <- shap.plot.summary(prep_xgb)+
+  labs(title = 'Summary SHAP Plot')
+
+# dependence plot
+p2 <- shap.plot.dependence(prep_xgb, x = 'cretmg')+
+  labs(title = 'Dependence plot - Creatinine')
